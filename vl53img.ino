@@ -7,7 +7,10 @@
 // User configuration
 // ----------------------------
 
-#define SERIAL_BAUD 115200
+  #define SERIAL_BAUD 115200
+  const uint8_t ROI_STEP_X = 1;
+  const uint8_t ROI_STEP_Y = 1;
+  const uint8_t MAX_ZONE_ATTEMPTS = 1;
 
 // ESP32 users can set explicit SDA/SCL pins here. Other boards ignore these when USE_CUSTOM_I2C_PINS is false.
 #define USE_CUSTOM_I2C_PINS false
@@ -26,10 +29,6 @@ const int INTERRUPT_PIN = -1;
 // Minimum ROI is 4x4. This sketch defaults to the maximum spatial sampling density.
 const uint8_t ROI_WIDTH = 4;
 const uint8_t ROI_HEIGHT = 4;
-
-// Stride 1 => 13x13 dense sweep. Stride 2 => 7x7 with 50% overlap. Stride 4 => 4x4 non-overlap.
-const uint8_t ROI_STEP_X = 1;
-const uint8_t ROI_STEP_Y = 1;
 
 // Clip outermost ROI placements if edge cells are unstable.
 // Example: set both to 1 to shrink a 13x13 sweep to 11x11.
@@ -52,7 +51,6 @@ const bool REPORT_INVALID_ZONES = true;
 
 // Retry the same ROI this many times if range status is non-zero.
 // This improves fill rate at the cost of frame time.
-const uint8_t MAX_ZONE_ATTEMPTS = 3;
 
 // ----------------------------
 // Verified SPAD map

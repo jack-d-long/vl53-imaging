@@ -21,6 +21,7 @@ So the practical answer to the "is it 8x8?" question is: no, not for a verified 
 
 - `vl53img.ino`: Arduino sketch for the SparkFun `SparkFun_VL53L1X` library.
 - `serial_visualizer.py`: Live serial heatmap viewer using `pyserial`, `numpy`, and `matplotlib`.
+- `capture_json_viewer.py`: Drag-and-drop offline viewer for saved frame JSON files using PyQt6.
 
 ## Arduino sketch behavior
 
@@ -67,6 +68,26 @@ python3 serial_visualizer.py /dev/ttyUSB0
 Change the port for your platform, for example `COM5` on Windows or `/dev/cu.usbserial-*` on macOS.
 
 The viewer sends `meta` automatically on connect. Click the `Capture` button, or press `space` / `c`, to request one frame from the sensor.
+
+## Offline JSON viewer
+
+Use the offline viewer for saved capture files such as `latest_capture.json`:
+
+```bash
+python3 capture_json_viewer.py latest_capture.json
+```
+
+Or launch it with no arguments and drag a `.json` capture file onto the window.
+
+Available controls:
+
+- Dataset selector: `signal`, `ambient`, `distance`, `status`, `attempts`
+- Render scale: expands the coarse sensor grid before display
+- Auto or manual color range
+- Colormap selection
+- Gaussian blur sigma in sensor-cell units
+- Interpolation mode
+- Invalid-zone masking
 
 ## Optional extensions
 

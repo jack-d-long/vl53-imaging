@@ -91,6 +91,8 @@ class LiveGridViewer:
             self.set_status(f"Invalid capture file: {self.capture_path.name}")
             return
 
+        if getattr(self, "print_zones_on_read", False):
+            print_zone_dump(payload)
         self.handle_frame(payload)
 
     def exit_requested(self, _event=None) -> None:
@@ -216,6 +218,7 @@ def main() -> int:
     try:
         with open_serial(args.port, args.baud) as ser:
             viewer = LiveGridViewer(ser, capture_path)
+            viewer.print_zones_on_read = args.print_zones
             time.sleep(1.0)
             ser.reset_input_buffer()
             viewer.send_command("meta")
@@ -255,8 +258,6 @@ def main() -> int:
                     elif message_type == "state":
                         viewer.handle_state(payload)
                     elif message_type == "frame":
-                        if args.print_zones:
-                            print_zone_dump(payload)
                         viewer.save_frame(payload)
                     else:
                         viewer.service_ui()
