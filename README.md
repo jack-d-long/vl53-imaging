@@ -82,12 +82,17 @@ Or launch it with no arguments and drag a `.json` capture file onto the window.
 Available controls:
 
 - Dataset selector: `signal`, `ambient`, `distance`, `status`, `attempts`
-- Render scale: expands the coarse sensor grid before display
+- Background lattice: size of the sparse sample grid filled with background samples
+- Samples per cell: output resolution of the reconstructed field
+- Interpolation method: `linear`, `nearest`, `cubic`, `idw`, `gaussian`
+- Method-specific controls appear only for the selected interpolation
 - Auto or manual color range
 - Colormap selection
-- Gaussian blur sigma in sensor-cell units
-- Interpolation mode
+- Gaussian sigma for the `gaussian` interpolator
+- IDW power for the `idw` interpolator
+- Cubic `a` parameter for the `cubic` interpolator
 - Invalid-zone masking
+- Matplotlib toolbar zoom/pan, with `Save PNG` preserving the current zoomed view
 
 ## Optional extensions
 
