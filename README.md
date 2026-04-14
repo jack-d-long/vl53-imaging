@@ -1,6 +1,8 @@
 # VL53L1X Max-Resolution ROI Sweep
 
-This repository contains a SparkFun-library Arduino sketch that sweeps a `4x4` VL53L1X ROI across the verified `16x16` SPAD map and streams per-zone `signal`, `ambient`, `distance`, and `range status` as JSON. A Python visualizer renders live heatmaps for IR intensity and distance.
+This repository contains a SparkFun-library Arduino sketch that sweeps a `4x4` VL53L1X ROI across the verified `16x16` SPAD map and streams per-zone `signal`, `ambient`, `distance`, and `range status` as JSON. A Python visualizer renders images for IR intensity and distance.
+
+'signal' is better for objects primarily illuminated by the sensor itself. Photographs of landscapes or other ambiently-lit environments are better constructed with 'ambient'. 
 
 ## Verified geometry
 
@@ -14,8 +16,6 @@ For a `4x4` ROI on a `16x16` array:
 - Dense step-1 sweep: `13 x 13 = 169` measurements.
 - 50% overlap step-2 sweep: `7 x 7 = 49` measurements.
 - Non-overlapping step-4 sweep: `4 x 4 = 16` measurements.
-
-So the practical answer to the "is it 8x8?" question is: no, not for a verified `4x4` ROI. The regular 2-SPAD-stride grid is `7x7`, while the true maximum spatial sampling density is `13x13`.
 
 ## Files
 
@@ -44,12 +44,6 @@ Ignoring serial overhead, the frame time is approximately:
 
 At `921600` baud the JSON transmission time is usually smaller than the ranging time, but dense mode is still a multi-second frame.
 
-## Gotchas
-
-- Per-zone calibration matters. UM2555 and AN5191 both note that offset calibration is ROI dependent; if you need better than a few centimeters, calibrate each zone separately.
-- If you see frequent status `13` near edges, increase `INTER_MEASUREMENT_MS` slightly or back the sweep one SPAD inward.
-- The SPAD map in the sketch matches ST's table orientation, not necessarily your final board orientation. If your assembled system rotates the sensor, rotate or flip in software.
-- Dense `13x13` mode is best on ESP32 or STM32. It is possible to run on AVR, but SRAM headroom and serial throughput are much tighter.
 
 ## Python visualizer
 
@@ -94,10 +88,10 @@ Available controls:
 - Invalid-zone masking
 - Matplotlib toolbar zoom/pan, with `Save PNG` preserving the current zoomed view
 
-## Optional extensions
+## Future work 
 
-- Super-resolution style reconstruction: use `ROI_STEP_X=1` and `ROI_STEP_Y=1`, then fuse overlapping measurements offline with interpolation or deconvolution.
-- Servo raster scan: at each pan/tilt angle, collect one full ROI sweep and stitch each sub-grid into a larger image. This is a clean next step because the sketch already emits spatially indexed zones.
+- use `ROI_STEP_X=1` and `ROI_STEP_Y=1`, then fuse overlapping measurements offline with interpolation or deconvolution.
+
 
 ## References
 
