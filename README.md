@@ -73,8 +73,18 @@ python3 capture_json_viewer.py latest_capture.json
 
 Or launch it with no arguments and drag a `.json` capture file onto the window.
 
+The same viewer can also talk directly to the device and save fresh captures through the existing JSON rendering pipeline:
+
+```bash
+python3 capture_json_viewer.py --port /dev/ttyUSB0 --auto-connect
+```
+
+The current Arduino sketch in this repo is configured for `115200` baud, so the viewer defaults to that rate.
+
 Available controls:
 
+- Serial port / baud / capture file: connection settings for live capture
+- Connect / Disconnect / Capture / Read Capture File: device control without switching to `serial_visualizer.py`
 - Dataset selector: `signal`, `ambient`, `composite`, `distance`, `status`, `attempts`
 - Ambient weight: for the `composite` dataset, `0.0` is all signal and `1.0` is all ambient
 - Reading overlay: `none`, `signal`, `ambient`, `signal + ambient`

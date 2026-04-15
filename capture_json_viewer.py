@@ -2,16 +2,20 @@
 
 import argparse
 import json
+import queue
 import sys
+import threading
+import time
 from pathlib import Path
 
 import matplotlib
 import numpy as np
+import serial
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QDragEnterEvent, QDropEvent
+from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -21,6 +25,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QSpinBox,
@@ -47,6 +52,9 @@ OVERLAY_OPTIONS = {
 INTERPOLATION_OPTIONS = ["linear", "nearest", "cubic", "idw", "gaussian"]
 WEIGHTED_CHUNK_SIZE = 4096
 COMPOSITE_FIELD = "signal_ambient_composite"
+DEFAULT_CAPTURE_PATH = Path("latest_capture.json")
+DEFAULT_SERIAL_PORT = "/dev/tty.usbserial-10"
+DEFAULT_SERIAL_BAUD = 115200
 
 
 def gaussian_kernel_1d(sigma: float) -> np.ndarray:
@@ -512,6 +520,13 @@ def interpolate_grid(
     return inverse_transform_field(field, result), extent
 
 
+def open_serial(port: str, baud: int) -> serial.Serial:
+    try:
+        return serial.Serial(port, baudrate=baud, timeout=0.05)
+    except serial.SerialException as exc:
+        raise RuntimeError(f"Failed to open {port}: {exc}") from exc
+
+
 class HeatmapCanvas(FigureCanvas):
     def __init__(self) -> None:
         self.figure = Figure(figsize=(7, 6))
@@ -592,16 +607,42 @@ class CaptureJsonViewer(QMainWindow):
         self.current_payload: dict | None = None
         self.current_grid_shape: tuple[int, int] | None = None
         self.last_valid_colormap = "gray"
+        self.capture_path = DEFAULT_CAPTURE_PATH
+        self.serial_connection: serial.Serial | None = None
+        self.device_state = "disconnected"
+        self.last_meta: dict | None = None
+        self.serial_reader_thread: threading.Thread | None = None
+        self.serial_stop_event = threading.Event()
+        self.serial_message_queue: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
+        self.serial_command_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+
+        self.serial_timer = QTimer(self)
+        self.serial_timer.setInterval(50)
+        self.serial_timer.timeout.connect(self.process_serial_messages)
 
         self.canvas = HeatmapCanvas()
         self.toolbar = NavigationToolbar(self.canvas, self)
         self.drop_label = QLabel("Drop a capture JSON here or click Open")
         self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_label.setStyleSheet("QLabel { border: 2px dashed #888; padding: 14px; }")
+        self.serial_status_label = QLabel("Serial: disconnected")
+        self.serial_status_label.setWordWrap(True)
 
         self.dataset_combo = QComboBox()
         self.dataset_combo.addItems(DATASET_OPTIONS.keys())
         self.dataset_combo.currentIndexChanged.connect(self.on_dataset_changed)
+
+        self.serial_port_edit = QLineEdit()
+        self.serial_port_edit.setPlaceholderText("/dev/ttyUSB0 or COM5")
+        self.serial_port_edit.setText(DEFAULT_SERIAL_PORT)
+
+        self.serial_baud_spin = QSpinBox()
+        self.serial_baud_spin.setRange(1200, 4_000_000)
+        self.serial_baud_spin.setSingleStep(1200)
+        self.serial_baud_spin.setValue(DEFAULT_SERIAL_BAUD)
+
+        self.capture_file_edit = QLineEdit(str(self.capture_path))
+        self.capture_file_edit.editingFinished.connect(self.update_capture_path_from_ui)
 
         self.overlay_combo = QComboBox()
         self.overlay_combo.addItems(OVERLAY_OPTIONS.keys())
@@ -697,19 +738,42 @@ class CaptureJsonViewer(QMainWindow):
         export_button = QPushButton("Save PNG")
         export_button.clicked.connect(self.save_png)
 
+        connect_button = QPushButton("Connect")
+        connect_button.clicked.connect(self.connect_serial)
+
+        disconnect_button = QPushButton("Disconnect")
+        disconnect_button.clicked.connect(self.disconnect_serial)
+
+        capture_button = QPushButton("Capture")
+        capture_button.clicked.connect(self.capture_requested)
+
+        read_capture_button = QPushButton("Read Capture File")
+        read_capture_button.clicked.connect(self.read_capture_file)
+
         button_row = QHBoxLayout()
         button_row.addWidget(open_button)
         button_row.addWidget(reload_button)
         button_row.addWidget(export_button)
 
+        serial_button_row = QHBoxLayout()
+        serial_button_row.addWidget(connect_button)
+        serial_button_row.addWidget(disconnect_button)
+        serial_button_row.addWidget(capture_button)
+        serial_button_row.addWidget(read_capture_button)
+
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
         controls_layout.addWidget(self.drop_label)
         controls_layout.addLayout(button_row)
+        controls_layout.addWidget(self.serial_status_label)
+        controls_layout.addLayout(serial_button_row)
         controls_layout.addWidget(QLabel("Use the plot toolbar to zoom/pan, then Save PNG to export the current view."))
 
         form = QFormLayout()
         self.form = form
+        form.addRow("Serial port", self.serial_port_edit)
+        form.addRow("Serial baud", self.serial_baud_spin)
+        form.addRow("Capture file", self.capture_file_edit)
         form.addRow("Dataset", self.dataset_combo)
         form.addRow("Ambient weight", self.composite_ambient_weight)
         form.addRow("Reading overlay", self.overlay_combo)
@@ -753,6 +817,7 @@ class CaptureJsonViewer(QMainWindow):
         self.update_range_controls()
         self.on_interpolation_changed()
         self.on_dataset_changed()
+        self.update_serial_status()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
@@ -776,6 +841,150 @@ class CaptureJsonViewer(QMainWindow):
         if filename:
             self.load_capture(Path(filename))
 
+    def capture_file_path(self) -> Path:
+        text = self.capture_file_edit.text().strip()
+        if text:
+            return Path(text)
+        return DEFAULT_CAPTURE_PATH
+
+    def update_capture_path_from_ui(self) -> None:
+        self.capture_path = self.capture_file_path()
+        self.capture_file_edit.setText(str(self.capture_path))
+        self.update_serial_status()
+
+    def update_serial_status(self, detail: str | None = None) -> None:
+        target = self.capture_file_path()
+        label = f"Serial: {self.device_state}"
+        if detail:
+            label = f"{label} | {detail}"
+        label = f"{label} | capture file: {target}"
+        self.serial_status_label.setText(label)
+
+    def connect_serial(self) -> None:
+        self.update_capture_path_from_ui()
+        port = self.serial_port_edit.text().strip()
+        if not port:
+            self.device_state = "disconnected"
+            self.update_serial_status("set a serial port first")
+            return
+
+        if self.serial_connection is not None:
+            self.disconnect_serial()
+
+        try:
+            self.serial_connection = open_serial(port, self.serial_baud_spin.value())
+        except RuntimeError as exc:
+            self.device_state = "disconnected"
+            self.update_serial_status(str(exc))
+            return
+
+        self.device_state = "connecting"
+        self.last_meta = None
+        self.serial_stop_event = threading.Event()
+        self.serial_message_queue = queue.SimpleQueue()
+        self.serial_command_queue = queue.SimpleQueue()
+        self.serial_reader_thread = threading.Thread(
+            target=self.serial_worker_main,
+            name="capture-json-viewer-serial",
+            daemon=True,
+        )
+        self.serial_reader_thread.start()
+        self.serial_timer.start()
+        self.update_serial_status(f"waiting for device reset on {port}")
+
+    def serial_worker_main(self) -> None:
+        assert self.serial_connection is not None
+
+        ser = self.serial_connection
+        buffer = bytearray()
+
+        try:
+            time.sleep(1.0)
+            if self.serial_stop_event.is_set():
+                return
+
+            ser.reset_input_buffer()
+            ser.write(b"meta\n")
+            ser.flush()
+
+            while not self.serial_stop_event.is_set():
+                while True:
+                    try:
+                        command = self.serial_command_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    ser.write((command + "\n").encode("utf-8"))
+                    ser.flush()
+
+                raw = ser.read(ser.in_waiting or 1)
+                if not raw:
+                    continue
+
+                buffer.extend(raw)
+                while b"\n" in buffer:
+                    line_bytes, _, remainder = buffer.partition(b"\n")
+                    buffer = bytearray(remainder)
+                    line = line_bytes.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        self.serial_message_queue.put(("raw", line))
+                        continue
+
+                    self.serial_message_queue.put(("payload", payload))
+        except serial.SerialException as exc:
+            self.serial_message_queue.put(("error", f"serial error: {exc}"))
+        finally:
+            try:
+                ser.close()
+            except serial.SerialException:
+                pass
+            self.serial_message_queue.put(("closed", None))
+
+    def disconnect_serial(self) -> None:
+        self.serial_timer.stop()
+        self.serial_stop_event.set()
+        if self.serial_connection is not None:
+            try:
+                self.serial_connection.close()
+            except serial.SerialException:
+                pass
+        if self.serial_reader_thread is not None:
+            self.serial_reader_thread.join(timeout=0.5)
+        self.serial_reader_thread = None
+        self.serial_connection = None
+        self.serial_message_queue = queue.SimpleQueue()
+        self.serial_command_queue = queue.SimpleQueue()
+        self.device_state = "disconnected"
+        self.update_serial_status()
+
+    def send_serial_command(self, command: str) -> None:
+        if self.serial_connection is None:
+            self.update_serial_status("not connected")
+            return
+        self.serial_command_queue.put(command)
+
+    def capture_requested(self) -> None:
+        if self.serial_connection is None:
+            self.update_serial_status("not connected")
+            return
+        if self.device_state == "connecting":
+            self.update_serial_status("device is still resetting")
+            return
+        self.device_state = "requesting"
+        self.update_serial_status("capture requested")
+        self.send_serial_command("capture")
+
+    def read_capture_file(self) -> None:
+        self.update_capture_path_from_ui()
+        if not self.capture_path.exists():
+            self.update_serial_status(f"no capture file: {self.capture_path.name}")
+            return
+        self.load_capture(self.capture_path)
+
     def save_png(self) -> None:
         if self.current_payload is None or self.current_path is None:
             self.drop_label.setText("Load a capture JSON before saving PNG")
@@ -793,6 +1002,19 @@ class CaptureJsonViewer(QMainWindow):
         if self.current_path is not None:
             self.load_capture(self.current_path)
 
+    def apply_frame_payload(self, payload: dict, source_path: Path | None = None) -> None:
+        if payload.get("type") != "frame":
+            self.drop_label.setText("JSON payload is not a frame capture")
+            return
+
+        if source_path is not None:
+            self.current_path = source_path
+            self.capture_path = source_path
+            self.capture_file_edit.setText(str(source_path))
+        self.current_payload = payload
+        self.populate_metadata(payload)
+        self.refresh_view()
+
     def load_capture(self, path: Path) -> None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -804,11 +1026,8 @@ class CaptureJsonViewer(QMainWindow):
             self.drop_label.setText(f"{path.name} is not a frame capture JSON")
             return
 
-        self.current_path = path
-        self.current_payload = payload
         self.drop_label.setText(f"Loaded: {path}")
-        self.populate_metadata(payload)
-        self.refresh_view()
+        self.apply_frame_payload(payload, source_path=path)
 
     def populate_metadata(self, payload: dict) -> None:
         lines = [
@@ -819,11 +1038,90 @@ class CaptureJsonViewer(QMainWindow):
             f"Frame time (ms): {payload.get('frame_time_ms')}",
         ]
 
+        if self.last_meta is not None:
+            lines.append(
+                "Meta rows x cols: {rows} x {cols}".format(
+                    rows=self.last_meta.get("rows"),
+                    cols=self.last_meta.get("cols"),
+                )
+            )
+
         statuses = [zone.get("status") for zone in payload.get("zones", [])]
         invalid_count = sum(1 for status in statuses if status != 0)
         lines.append(f"Invalid zones: {invalid_count}")
 
         self.meta_text.setPlainText("\n".join(lines))
+
+    def save_frame(self, payload: dict) -> None:
+        self.update_capture_path_from_ui()
+        self.capture_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def handle_serial_meta(self, payload: dict) -> None:
+        self.last_meta = payload
+        self.device_state = "idle"
+        self.update_serial_status("metadata received")
+        if self.current_payload is not None:
+            self.populate_metadata(self.current_payload)
+
+    def handle_serial_state(self, payload: dict) -> None:
+        state = payload.get("state")
+        if isinstance(state, str):
+            self.device_state = state
+            if state == "idle":
+                self.update_serial_status("ready")
+            elif state == "capturing":
+                self.update_serial_status("capturing")
+            else:
+                self.update_serial_status("device update")
+
+    def handle_serial_frame(self, payload: dict) -> None:
+        try:
+            self.save_frame(payload)
+        except OSError as exc:
+            self.update_serial_status(f"failed to save frame: {exc}")
+            return
+        self.device_state = "idle"
+        self.drop_label.setText(f"Captured: {self.capture_path}")
+        self.apply_frame_payload(payload, source_path=self.capture_path)
+        frame_id = payload.get("frame")
+        frame_time_ms = payload.get("frame_time_ms")
+        self.update_serial_status(f"frame {frame_id} | {frame_time_ms} ms")
+
+    def handle_serial_payload(self, payload: dict) -> None:
+        message_type = payload.get("type")
+        if message_type == "meta":
+            self.handle_serial_meta(payload)
+        elif message_type == "state":
+            self.handle_serial_state(payload)
+        elif message_type == "frame":
+            self.handle_serial_frame(payload)
+        elif message_type == "help":
+            self.update_serial_status("device help received")
+        elif message_type == "error":
+            self.update_serial_status(str(payload.get("message", "device error")))
+
+    def process_serial_messages(self) -> None:
+        while True:
+            try:
+                kind, value = self.serial_message_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if kind == "payload":
+                assert isinstance(value, dict)
+                self.handle_serial_payload(value)
+            elif kind == "raw":
+                print(f"Skipping non-JSON line: {value}", file=sys.stderr)
+            elif kind == "error":
+                self.disconnect_serial()
+                self.update_serial_status(str(value))
+                break
+            elif kind == "closed":
+                if self.serial_stop_event.is_set():
+                    break
+                self.disconnect_serial()
+                self.update_serial_status("serial connection closed")
+                break
 
     def update_range_controls(self) -> None:
         manual = not self.auto_range_checkbox.isChecked()
@@ -1125,11 +1423,23 @@ class CaptureJsonViewer(QMainWindow):
             annotations=annotations,
         )
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.disconnect_serial()
+        super().closeEvent(event)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="VL53L1X capture JSON viewer / PNG exporter")
     parser.add_argument("capture_json", nargs="?", help="Optional capture JSON to load")
     parser.add_argument("--export-png", help="Export directly to PNG without launching the UI")
+    parser.add_argument(
+        "--port",
+        default=DEFAULT_SERIAL_PORT,
+        help="Serial port, for example /dev/ttyUSB0 or COM5",
+    )
+    parser.add_argument("--baud", type=int, default=DEFAULT_SERIAL_BAUD, help="Serial baud rate")
+    parser.add_argument("--capture-file", default=str(DEFAULT_CAPTURE_PATH), help="Path for captured frame JSON")
+    parser.add_argument("--auto-connect", action="store_true", help="Connect to the serial port on launch")
     parser.add_argument(
         "--dataset",
         choices=list(DATASET_OPTIONS.keys()),
@@ -1164,6 +1474,11 @@ def main() -> int:
     viewer = CaptureJsonViewer()
     capture_path = Path(args.capture_json) if args.capture_json else None
 
+    viewer.capture_path = Path(args.capture_file)
+    viewer.capture_file_edit.setText(str(viewer.capture_path))
+    viewer.serial_port_edit.setText(args.port)
+    viewer.serial_baud_spin.setValue(args.baud)
+
     if capture_path is not None:
         viewer.load_capture(capture_path)
 
@@ -1190,6 +1505,9 @@ def main() -> int:
         viewer.refresh_view()
         viewer.canvas.save_png(Path(args.export_png))
         return 0
+
+    if args.auto_connect:
+        viewer.connect_serial()
 
     viewer.show()
 
