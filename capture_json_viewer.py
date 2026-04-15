@@ -651,11 +651,10 @@ class CaptureJsonViewer(QMainWindow):
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems([
             "inferno",
+            "afmhot",
+            "gist_heat",
             "viridis",
             "magma",
-            "plasma",
-            "cividis",
-            "turbo",
             "gray",
         ])
         self.colormap_combo.setEditable(True)

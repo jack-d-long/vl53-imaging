@@ -88,12 +88,13 @@ Available controls:
 - Dataset selector: `signal`, `ambient`, `composite`, `distance`, `status`, `attempts`
 - Ambient weight: for the `composite` dataset, `0.0` is all signal and `1.0` is all ambient
 - Reading overlay: `none`, `signal`, `ambient`, `signal + ambient`
+- Colormap presets: `inferno`, `afmhot`, `gist_heat`, `viridis`, `magma`, `gray`
 - Background lattice: size of the sparse sample grid filled with background samples
 - Samples per cell: output resolution of the reconstructed field
 - Interpolation method: `linear`, `nearest`, `cubic`, `idw`, `gaussian`
 - Method-specific controls appear only for the selected interpolation
 - Auto or manual color range
-- Colormap selection
+- Editable colormap selection
 - Gaussian sigma for the `gaussian` interpolator
 - IDW power for the `idw` interpolator
 - Cubic `a` parameter for the `cubic` interpolator
