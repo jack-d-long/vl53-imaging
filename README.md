@@ -1,10 +1,10 @@
-# VL53L1X Max-Resolution ROI Sweep
+# Photos from the VL53L1X Distance Sensor
 
-This repository contains a SparkFun-library Arduino sketch that sweeps a `4x4` VL53L1X ROI across the verified `16x16` SPAD map and streams per-zone `signal`, `ambient`, `distance`, and `range status` as JSON. A Python visualizer renders images for IR intensity and distance.
+This repository contains a SparkFun-library Arduino sketch that sweeps a 4x4 region of interest (ROI) across the 16x16 single photon avalanche diode (SPAD) array of the VL53L1X and streams per-zone `signal`, `ambient`, `distance`, and `range status` as JSON. A Python visualizer renders images for IR intensity and distance.
 
 'signal' is better for objects primarily illuminated by the sensor itself. Photographs of landscapes or other ambiently-lit environments are better constructed with 'ambient'. 
 
-## Verified geometry
+## The Sensor
 
 The SPAD numbering in the sketch is taken directly from ST UM2555 Rev 3, section 3.1. ST also states that when an ROI center falls between SPADs, you choose the SPAD "to the right, or above" the geometric center.
 
