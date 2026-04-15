@@ -33,12 +33,20 @@ from PyQt6.QtWidgets import (
 DATASET_OPTIONS = {
     "Signal (kcps)": "signal_kcps",
     "Ambient (kcps)": "ambient_kcps",
+    "Composite (Signal + Ambient)": "signal_ambient_composite",
     "Distance (mm)": "distance_mm",
     "Status": "status",
     "Attempts": "attempts",
 }
+OVERLAY_OPTIONS = {
+    "None": "none",
+    "Signal": "signal",
+    "Ambient": "ambient",
+    "Signal + Ambient": "both",
+}
 INTERPOLATION_OPTIONS = ["linear", "nearest", "cubic", "idw", "gaussian"]
 WEIGHTED_CHUNK_SIZE = 4096
+COMPOSITE_FIELD = "signal_ambient_composite"
 
 
 def gaussian_kernel_1d(sigma: float) -> np.ndarray:
@@ -522,6 +530,7 @@ class HeatmapCanvas(FigureCanvas):
         vmax: float | None,
         extent: tuple[float, float, float, float] | None = None,
         view_limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        annotations: list[tuple[float, float, str]] | None = None,
     ) -> None:
         self.axes.clear()
         self.colorbar_axes.clear()
@@ -541,6 +550,25 @@ class HeatmapCanvas(FigureCanvas):
         self.axes.set_xlabel("Grid column")
         self.axes.set_ylabel("Grid row")
         self.axes.set_aspect("equal")
+
+        if annotations is not None:
+            for x, y, text in annotations:
+                self.axes.text(
+                    x,
+                    y,
+                    text,
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontsize=7,
+                    family="monospace",
+                    bbox={
+                        "boxstyle": "round,pad=0.18",
+                        "facecolor": "black",
+                        "alpha": 0.55,
+                        "linewidth": 0,
+                    },
+                )
 
         if view_limits is not None:
             (x0, x1), (y0, y1) = view_limits
@@ -573,7 +601,11 @@ class CaptureJsonViewer(QMainWindow):
 
         self.dataset_combo = QComboBox()
         self.dataset_combo.addItems(DATASET_OPTIONS.keys())
-        self.dataset_combo.currentIndexChanged.connect(self.refresh_view)
+        self.dataset_combo.currentIndexChanged.connect(self.on_dataset_changed)
+
+        self.overlay_combo = QComboBox()
+        self.overlay_combo.addItems(OVERLAY_OPTIONS.keys())
+        self.overlay_combo.currentIndexChanged.connect(self.refresh_view)
 
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems([
@@ -626,6 +658,13 @@ class CaptureJsonViewer(QMainWindow):
         self.background_grid.setValue(20)
         self.background_grid.valueChanged.connect(self.refresh_view)
 
+        self.composite_ambient_weight = QDoubleSpinBox()
+        self.composite_ambient_weight.setRange(0.0, 1.0)
+        self.composite_ambient_weight.setSingleStep(0.05)
+        self.composite_ambient_weight.setDecimals(2)
+        self.composite_ambient_weight.setValue(0.50)
+        self.composite_ambient_weight.valueChanged.connect(self.refresh_view)
+
         self.mask_invalid_checkbox = QCheckBox("Mask invalid zones")
         self.mask_invalid_checkbox.setChecked(True)
         self.mask_invalid_checkbox.stateChanged.connect(self.refresh_view)
@@ -672,6 +711,8 @@ class CaptureJsonViewer(QMainWindow):
         form = QFormLayout()
         self.form = form
         form.addRow("Dataset", self.dataset_combo)
+        form.addRow("Ambient weight", self.composite_ambient_weight)
+        form.addRow("Reading overlay", self.overlay_combo)
         form.addRow("Colormap", self.colormap_combo)
         form.addRow("Interpolation method", self.interpolation_combo)
         form.addRow("Background lattice", self.background_grid)
@@ -711,6 +752,7 @@ class CaptureJsonViewer(QMainWindow):
         self.resize(1200, 720)
         self.update_range_controls()
         self.on_interpolation_changed()
+        self.on_dataset_changed()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
@@ -810,6 +852,13 @@ class CaptureJsonViewer(QMainWindow):
     def selected_field(self) -> str:
         return DATASET_OPTIONS[self.dataset_combo.currentText()]
 
+    def on_dataset_changed(self) -> None:
+        self.set_form_row_visible(self.composite_ambient_weight, self.selected_field() == COMPOSITE_FIELD)
+        self.refresh_view()
+
+    def selected_overlay_mode(self) -> str:
+        return OVERLAY_OPTIONS[self.overlay_combo.currentText()]
+
     def current_colormap(self) -> str:
         cmap_name = self.colormap_combo.currentText().strip()
         if cmap_name in matplotlib.colormaps:
@@ -817,17 +866,16 @@ class CaptureJsonViewer(QMainWindow):
             return cmap_name
         return self.last_valid_colormap
 
-    def build_grid(self) -> tuple[np.ndarray, tuple[float, float, float, float], tuple[float, float, float, float]] | None:
-        if self.current_payload is None:
-            return None
+    def build_field_sample_grids(self, field: str) -> tuple[np.ndarray, np.ndarray]:
+        assert self.current_payload is not None
 
         rows = int(self.current_payload["rows"])
         cols = int(self.current_payload["cols"])
-        field = self.selected_field()
         mask_invalid = self.mask_invalid_checkbox.isChecked()
         fill_value = background_value(field)
         sample_grid = np.full((rows, cols), np.nan, dtype=float)
         background_grid = np.full((rows, cols), fill_value, dtype=float)
+
         for zone in self.current_payload["zones"]:
             row = zone["grid_row"]
             col = zone["grid_col"]
@@ -840,7 +888,61 @@ class CaptureJsonViewer(QMainWindow):
             sample_grid[row, col] = transformed
             background_grid[row, col] = transformed
 
+        return sample_grid, background_grid
+
+    def build_overlay_annotations(self, x_offset: float, y_offset: float) -> list[tuple[float, float, str]]:
+        if self.current_payload is None:
+            return []
+
+        overlay_mode = self.selected_overlay_mode()
+        if overlay_mode == "none":
+            return []
+
+        mask_invalid = self.mask_invalid_checkbox.isChecked()
+        annotations: list[tuple[float, float, str]] = []
+        for zone in self.current_payload["zones"]:
+            if mask_invalid and zone.get("status", 1) != 0:
+                continue
+
+            parts = []
+            if overlay_mode in {"signal", "both"}:
+                signal = zone.get("signal_kcps")
+                if signal is not None:
+                    parts.append(f"S:{int(signal)}")
+            if overlay_mode in {"ambient", "both"}:
+                ambient = zone.get("ambient_kcps")
+                if ambient is not None:
+                    parts.append(f"A:{int(ambient)}")
+
+            if not parts:
+                continue
+
+            annotations.append(
+                (
+                    float(zone["grid_col"]) + x_offset,
+                    float(zone["grid_row"]) + y_offset,
+                    "\n".join(parts),
+                )
+            )
+
+        return annotations
+
+    def build_interpolated_grid(
+        self,
+        field: str,
+    ) -> tuple[
+        np.ndarray,
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
+        list[tuple[float, float, str]],
+    ]:
+        assert self.current_payload is not None
+
+        rows = int(self.current_payload["rows"])
+        cols = int(self.current_payload["cols"])
+        sample_grid, background_grid = self.build_field_sample_grids(field)
         method = self.interpolation_combo.currentText()
+
         if method == "idw":
             sample_x, sample_y, sample_values = extract_sample_points(sample_grid)
             x_coords, y_coords = build_render_domain(rows, cols, self.render_scale.value())
@@ -856,6 +958,7 @@ class CaptureJsonViewer(QMainWindow):
             extent = (-0.5, cols - 0.5, rows - 0.5, -0.5)
             interpolated = inverse_transform_field(field, interpolated)
             sampled_extent = extent
+            annotations = self.build_overlay_annotations(x_offset=0.0, y_offset=0.0)
         else:
             lattice, (top, left) = embed_in_background(background_grid, field, self.background_grid.value())
 
@@ -875,8 +978,76 @@ class CaptureJsonViewer(QMainWindow):
                 top + rows - 0.5,
                 top - 0.5,
             )
+            annotations = self.build_overlay_annotations(x_offset=float(left), y_offset=float(top))
 
-        return interpolated, extent, sampled_extent
+        return interpolated, extent, sampled_extent, annotations
+
+    def normalize_grid_for_composite(
+        self,
+        grid: np.ndarray,
+        full_extent: tuple[float, float, float, float],
+        sampled_extent: tuple[float, float, float, float],
+    ) -> np.ndarray:
+        sampled_mask = extent_mask(grid.shape, full_extent, sampled_extent)
+        finite_sampled = grid[np.isfinite(grid) & sampled_mask]
+        normalized = np.full_like(grid, np.nan, dtype=float)
+        if finite_sampled.size == 0:
+            return normalized
+
+        lo = float(np.nanmin(finite_sampled))
+        hi = float(np.nanmax(finite_sampled))
+        finite = np.isfinite(grid)
+        if hi <= lo + 1e-12:
+            normalized[finite] = 1.0 if hi > 0.0 else 0.0
+            return normalized
+
+        normalized[finite] = np.clip((grid[finite] - lo) / (hi - lo), 0.0, 1.0)
+        return normalized
+
+    def build_composite_grid(
+        self,
+    ) -> tuple[
+        np.ndarray,
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
+        list[tuple[float, float, str]],
+    ]:
+        signal_grid, extent, sampled_extent, annotations = self.build_interpolated_grid("signal_kcps")
+        ambient_grid, _, _, _ = self.build_interpolated_grid("ambient_kcps")
+
+        signal_normalized = self.normalize_grid_for_composite(signal_grid, extent, sampled_extent)
+        ambient_normalized = self.normalize_grid_for_composite(ambient_grid, extent, sampled_extent)
+
+        ambient_weight = float(self.composite_ambient_weight.value())
+        signal_weight = 1.0 - ambient_weight
+
+        weighted_sum = (
+            np.where(np.isfinite(signal_normalized), signal_normalized * signal_weight, 0.0)
+            + np.where(np.isfinite(ambient_normalized), ambient_normalized * ambient_weight, 0.0)
+        )
+        weight_sum = (
+            np.where(np.isfinite(signal_normalized), signal_weight, 0.0)
+            + np.where(np.isfinite(ambient_normalized), ambient_weight, 0.0)
+        )
+        composite = np.full_like(signal_normalized, np.nan, dtype=float)
+        np.divide(weighted_sum, weight_sum, out=composite, where=weight_sum > 0)
+        return composite, extent, sampled_extent, annotations
+
+    def build_grid(
+        self,
+    ) -> tuple[
+        np.ndarray,
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
+        list[tuple[float, float, str]],
+    ] | None:
+        if self.current_payload is None:
+            return None
+
+        field = self.selected_field()
+        if field == COMPOSITE_FIELD:
+            return self.build_composite_grid()
+        return self.build_interpolated_grid(field)
 
     def auto_range(
         self,
@@ -913,7 +1084,7 @@ class CaptureJsonViewer(QMainWindow):
         built = self.build_grid()
         if built is None:
             return
-        grid, extent, sampled_extent = built
+        grid, extent, sampled_extent, annotations = built
         self.current_grid_shape = grid.shape
 
         if self.auto_range_checkbox.isChecked():
@@ -932,6 +1103,10 @@ class CaptureJsonViewer(QMainWindow):
                 vmax = vmin + 1.0
 
         title = self.dataset_combo.currentText()
+        if self.selected_field() == COMPOSITE_FIELD:
+            ambient_weight = self.composite_ambient_weight.value()
+            signal_weight = 1.0 - ambient_weight
+            title = f"{title} [signal={signal_weight:.2f}, ambient={ambient_weight:.2f}]"
         if self.current_path is not None:
             title = f"{title} - {self.current_path.name}"
 
@@ -947,6 +1122,7 @@ class CaptureJsonViewer(QMainWindow):
             vmax=vmax,
             extent=extent,
             view_limits=existing_limits,
+            annotations=annotations,
         )
 
 
@@ -960,10 +1136,22 @@ def main() -> int:
         default="Signal (kcps)",
         help="Dataset to render for export",
     )
+    parser.add_argument(
+        "--overlay-readings",
+        choices=list(OVERLAY_OPTIONS.keys()),
+        default="None",
+        help="Optional per-zone reading overlay for export",
+    )
     parser.add_argument("--colormap", default="gray", help="Matplotlib colormap name")
     parser.add_argument("--interpolation", default="linear", choices=INTERPOLATION_OPTIONS)
     parser.add_argument("--background-grid", type=int, default=20, help="Size of the sparse background sample lattice")
     parser.add_argument("--render-scale", type=int, default=12, help="Output resolution in samples per source cell")
+    parser.add_argument(
+        "--ambient-weight",
+        type=float,
+        default=0.5,
+        help="Composite blend factor from 0.0 (all signal) to 1.0 (all ambient)",
+    )
     parser.add_argument("--sigma", type=float, default=0.0, help="Gaussian interpolation sigma")
     parser.add_argument("--idw-power", type=float, default=2.0, help="IDW power parameter")
     parser.add_argument("--cubic-a", type=float, default=-0.5, help="Parametric cubic kernel coefficient")
@@ -980,10 +1168,12 @@ def main() -> int:
         viewer.load_capture(capture_path)
 
     viewer.dataset_combo.setCurrentText(args.dataset)
+    viewer.overlay_combo.setCurrentText(args.overlay_readings)
     viewer.colormap_combo.setCurrentText(args.colormap)
     viewer.interpolation_combo.setCurrentText(args.interpolation)
     viewer.background_grid.setValue(args.background_grid)
     viewer.render_scale.setValue(args.render_scale)
+    viewer.composite_ambient_weight.setValue(min(max(args.ambient_weight, 0.0), 1.0))
     viewer.blur_sigma.setValue(args.sigma)
     viewer.idw_power.setValue(args.idw_power)
     viewer.cubic_a.setValue(args.cubic_a)

@@ -75,7 +75,9 @@ Or launch it with no arguments and drag a `.json` capture file onto the window.
 
 Available controls:
 
-- Dataset selector: `signal`, `ambient`, `distance`, `status`, `attempts`
+- Dataset selector: `signal`, `ambient`, `composite`, `distance`, `status`, `attempts`
+- Ambient weight: for the `composite` dataset, `0.0` is all signal and `1.0` is all ambient
+- Reading overlay: `none`, `signal`, `ambient`, `signal + ambient`
 - Background lattice: size of the sparse sample grid filled with background samples
 - Samples per cell: output resolution of the reconstructed field
 - Interpolation method: `linear`, `nearest`, `cubic`, `idw`, `gaussian`
@@ -87,6 +89,12 @@ Available controls:
 - Cubic `a` parameter for the `cubic` interpolator
 - Invalid-zone masking
 - Matplotlib toolbar zoom/pan, with `Save PNG` preserving the current zoomed view
+
+You can also include overlays when exporting directly:
+
+```bash
+python3 capture_json_viewer.py latest_capture.json --dataset "Composite (Signal + Ambient)" --ambient-weight 0.65 --overlay-readings "Signal + Ambient" --export-png latest_capture.png
+```
 
 ## Future work 
 
